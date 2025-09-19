@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Gerador otimizado de CPFs válidos usando divisão em 4 partes separadas
-Gera CSVs por parte e depois combina e valida
+Gerador otimizado de CPFs válidos.
+A versão otimizada ('gerar-validos') calcula os dígitos verificadores
+em vez de testar todas as combinações.
 """
 
 import csv
@@ -15,6 +16,10 @@ from typing import List, Tuple, Dict, Any, Generator
 import argparse
 import logging
 
+# ==============================================================================
+# SUAS CLASSES ORIGINAIS (CPFValidator, CPFPartGenerator, CPFCombiner)
+# Não foram alteradas. Pode ocultá-las para focar na nova solução.
+# ==============================================================================
 
 class CPFValidator:
         
@@ -344,14 +349,149 @@ class CPFCombiner:
         
         return stats
 
+# ==============================================================================
+# NOVA CLASSE OTIMIZADA
+# ==============================================================================
+
+class CPFGenerator:
+    """
+    Gera apenas CPFs válidos calculando os dígitos verificadores,
+    em vez de testar todas as combinações.
+    """
+    def __init__(self, output_dir: str = "cpf_output"):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True)
+        self.logger = self._setup_logging()
+
+    def _setup_logging(self) -> logging.Logger:
+        """Configura logging"""
+        logger = logging.getLogger('cpf_generator')
+        logger.setLevel(logging.INFO)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        return logger
+
+    def _calculate_dv(self, numbers: List[int]) -> int:
+        """Calcula um dígito verificador a partir de uma lista de números."""
+        # O cálculo do DV do CPF usa um multiplicador que começa em 2 para o primeiro DV
+        # e em 2 para o segundo DV (mas com 11 dígitos).
+        # Para simplificar, podemos usar um peso decrescente.
+        # Ex: 10, 9, 8... para o primeiro DV e 11, 10, 9... para o segundo.
+        soma = sum(num * (len(numbers) + 1 - i) for i, num in enumerate(numbers))
+        resto = soma % 11
+        return 0 if resto < 2 else 11 - resto
+
+    def gerar_cpfs_validos(self, 
+                          ranges: Dict[str, Tuple[int, int]],
+                          output_file: str = None,
+                          batch_size: int = 10000,
+                          max_cpfs: int = None) -> Dict[str, Any]:
+        """Gera CPFs válidos iterando sobre as bases e calculando os DVs."""
+        if output_file is None:
+            output_file = str(self.output_dir / "cpfs_gerados_validos.csv")
+            
+        self.logger.info("Iniciando geração otimizada de CPFs válidos...")
+        inicio = datetime.now()
+
+        # Extrai os ranges
+        p1_range = range(ranges['parte1'][0], ranges['parte1'][1] + 1)
+        p2_range = range(ranges['parte2'][0], ranges['parte2'][1] + 1)
+        p3_range = range(ranges['parte3'][0], ranges['parte3'][1] + 1)
+
+        total_bases = len(p1_range) * len(p2_range) * len(p3_range)
+        self.logger.info(f"Total de bases de 9 dígitos a processar: {total_bases:,}")
+
+        stats = {
+            'inicio': inicio,
+            'total_bases': total_bases,
+            'cpfs_gerados': 0,
+            'sequencias_repetidas_ignoradas': 0,
+            'output_file': output_file
+        }
+
+        with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['cpf_valido'])
+            
+            batch = []
+            
+            for p1 in p1_range:
+                for p2 in p2_range:
+                    for p3 in p3_range:
+                        base_str = f"{p1:03d}{p2:03d}{p3:03d}"
+                        
+                        # Pula sequências de dígitos repetidos (ex: 111.111.111)
+                        if base_str == base_str[0] * 9:
+                            stats['sequencias_repetidas_ignoradas'] += 1
+                            continue
+
+                        # Calcula o primeiro dígito verificador
+                        base_numeros = [int(d) for d in base_str]
+                        dv1 = self._calculate_dv(base_numeros)
+                        
+                        # Calcula o segundo dígito verificador
+                        base_com_dv1 = base_numeros + [dv1]
+                        dv2 = self._calculate_dv(base_com_dv1)
+                        
+                        # Monta o CPF válido
+                        cpf_valido = f"{base_str}{dv1}{dv2}"
+                        batch.append([cpf_valido])
+                        stats['cpfs_gerados'] += 1
+                        
+                        # Escreve o lote no arquivo
+                        if len(batch) >= batch_size:
+                            writer.writerows(batch)
+                            batch = []
+                        
+                        # Log de progresso
+                        if stats['cpfs_gerados'] % 500000 == 0:
+                            self.logger.info(f"CPFs gerados: {stats['cpfs_gerados']:,}")
+                        
+                        # Para se atingir o limite
+                        if max_cpfs and stats['cpfs_gerados'] >= max_cpfs:
+                            break
+                    if max_cpfs and stats['cpfs_gerados'] >= max_cpfs:
+                        break
+                if max_cpfs and stats['cpfs_gerados'] >= max_cpfs:
+                    break
+
+            # Escreve o lote final
+            if batch:
+                writer.writerows(batch)
+
+        stats['fim'] = datetime.now()
+        stats['duracao_segundos'] = (stats['fim'] - stats['inicio']).total_seconds()
+
+        # Salva relatório
+        relatorio_file = self.output_dir / "relatorio_geracao_otimizada.json"
+        with open(relatorio_file, 'w', encoding='utf-8') as f:
+            json.dump(stats, f, indent=2, default=str)
+
+        self.logger.info("=== GERAÇÃO OTIMIZADA CONCLUÍDA ===")
+        self.logger.info(f"Total de CPFs válidos gerados: {stats['cpfs_gerados']:,}")
+        self.logger.info(f"Sequências repetidas ignoradas: {stats['sequencias_repetidas_ignoradas']:,}")
+        self.logger.info(f"Duração: {stats['duracao_segundos']:.2f}s")
+        self.logger.info(f"Arquivo final: {output_file}")
+        self.logger.info(f"Relatório: {relatorio_file}")
+        
+        return stats
+
+
+# ==============================================================================
+# FUNÇÃO MAIN ATUALIZADA
+# ==============================================================================
 
 def main():
     """Função principal"""
-    parser = argparse.ArgumentParser(description='Gerador CPF por Partes Separadas')
-    parser.add_argument('--action', choices=['gerar-partes', 'combinar', 'completo'], 
-                       default='completo', help='Ação a executar')
+    parser = argparse.ArgumentParser(description='Gerador de CPF Válido')
+    # Adicionada a nova ação 'gerar-validos'
+    parser.add_argument('--action', choices=['gerar-partes', 'combinar', 'completo', 'gerar-validos'], 
+                       default='gerar-validos', help='Ação a executar. "gerar-validos" é o método otimizado.')
     parser.add_argument('--parts-dir', default='cpf_parts',
-                       help='Diretório das partes')
+                       help='Diretório das partes (usado por `combinar`)')
     parser.add_argument('--output-dir', default='cpf_output',
                        help='Diretório de saída')
     parser.add_argument('--parte1-inicio', type=int, default=0)
@@ -371,22 +511,38 @@ def main():
     
     # Modo sample
     if args.sample:
-        args.parte1_inicio = 0
         args.parte1_fim = 9
-        args.parte2_inicio = 0
         args.parte2_fim = 9
-        args.parte3_inicio = 0
         args.parte3_fim = 9
         args.max_cpfs = 1000  # Limita para teste
-        print("🧪 Modo SAMPLE ativado")
+        print("🧪 Modo SAMPLE ativado (gerando a partir de 1000 bases)")
     
     parte1_range = (args.parte1_inicio, args.parte1_fim)
     parte2_range = (args.parte2_inicio, args.parte2_fim)
     parte3_range = (args.parte3_inicio, args.parte3_fim)
-    
+
+    # --- Lógica para a nova ação ---
+    if args.action == 'gerar-validos':
+        print("🚀 Executando gerador otimizado...")
+        generator = CPFGenerator(args.output_dir)
+        ranges = {
+            'parte1': parte1_range,
+            'parte2': parte2_range,
+            'parte3': parte3_range
+        }
+        stats = generator.gerar_cpfs_validos(
+            ranges=ranges,
+            batch_size=args.batch_size,
+            max_cpfs=args.max_cpfs
+        )
+        print("✅ Geração otimizada concluída!")
+        print(f"📊 CPFs válidos gerados: {stats['cpfs_gerados']:,}")
+        print(f"📁 Arquivo final: {stats['output_file']}")
+        return
+
+    # --- Lógica original mantida ---
     if args.action in ['gerar-partes', 'completo']:
-        # Gera as 4 partes
-        print("📋 Gerando partes...")
+        print("📋 Gerando partes (método antigo)...")
         part_generator = CPFPartGenerator(args.parts_dir)
         arquivos = part_generator.gerar_todas_as_partes(
             parte1_range, parte2_range, parte3_range
@@ -396,15 +552,14 @@ def main():
             print(f"  {nome}: {arquivo}")
     
     if args.action in ['combinar', 'completo']:
-        # Combina e valida
-        print("🔄 Combinando partes e validando...")
+        print("🔄 Combinando partes e validando (método antigo e lento)...")
         combiner = CPFCombiner(args.parts_dir, args.output_dir)
         stats = combiner.combinar_e_validar(
             batch_size=args.batch_size,
             max_cpfs=args.max_cpfs
         )
         print("✅ Combinação concluída!")
-        print(f"📊 CPFs válidos gerados: {stats['total_validos']:,}")
+        print(f"📊 CPFs válidos encontrados: {stats['total_validos']:,}")
         print(f"📁 Arquivo final: {stats['output_file']}")
 
 
